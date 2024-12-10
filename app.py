@@ -9,6 +9,8 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -29,6 +31,8 @@ clean_sheet_stats_df = pd.read_csv('defender_clean_sheets_stats.csv')
 # Create TF-IDF vectorizer
 vectorizer = TfidfVectorizer()
 
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
 # Database connection
 def get_db_connection():
     try:
@@ -43,6 +47,49 @@ def get_db_connection():
     except psycopg2.Error as e:
         logging.error(f"Unable to connect to the database: {e}")
         return None
+    
+documents_date = [
+    "2019", "2020", "2021", "2022", "2023", "2024",
+    "2019/2020", "2020/2021", "2021/2022", "2022/2023", "2023/2024"
+]
+
+embeddings_dates = embedding_model.encode(documents_date)
+
+df_dates = pd.DataFrame({"Document": documents_date, "Embedding": list(embeddings_dates)})
+
+def retrieve_with_pandas_date(query, top_k=1):
+    query_embedding = embedding_model.encode([query])[0]
+    df_dates['Similarity'] = df_dates['Embedding'].apply(lambda x: np.dot(query_embedding, x) / (np.linalg.norm(query_embedding) * np.linalg.norm(x)))
+    filtered_results = df_dates[df_dates['Similarity'] > 0.3].sort_values(by="Similarity", ascending=False).head(top_k)
+
+    if filtered_results.empty:
+        return False
+    else:
+        return True
+    
+def without_data(query):
+    system_message = "You are a Premier League statistics analyst. Answer the following question accurately, concisely, and with a focus on relevant data."
+    completion = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": query},
+        ]
+    )
+    
+    return completion
+
+def with_data(query, system_message):
+    completion = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": query},
+        ]
+    )
+    
+    return completion
+    
 
 def get_relevant_data(query):
     # Determine which CSV file to use based on the query
@@ -80,31 +127,23 @@ def chat():
         data = request.json
         user_input = data['message']
         
+        relevant_data = None
+        context = None
+        
         # Log the received prompt
         print(f"Received prompt from frontend: {user_input}")
 
-        # Get relevant data based on the query
-        relevant_data, context = get_relevant_data(user_input)
+        if retrieve_with_pandas_date(user_input):
+            relevant_data, context = get_relevant_data(user_input)
 
         if relevant_data:
-            system_message = f"""You are a Premier League stat analyst. Use the following {context} data to answer the question:
-            {relevant_data}
-            
-            Provide a concise and accurate answer based solely on the data provided. If the data doesn't contain the exact information needed, use the closest relevant information and explain any assumptions or limitations."""
+            system_message = f"""You are a Premier League stat analyst. Use the following {context} data to answer the question: {relevant_data} Provide a concise and accurate answer based solely on the data provided. If the data doesn't contain the exact information needed example the year 2019 or prior use any information from the internet or anywhere else to answer the question, use the closest relevant information and explain any assumptions or limitations."""
+            completion = with_data(system_message, user_input)
         else:
-            system_message = "You are a Premier League stat analyst. If asked about recent statistics, inform the user that you don't have access to the most recent data."
-
-        completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",    
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_input},
-            ]
-        )
+            completion = without_data(user_input)
 
         ai_response = completion.choices[0].message['content']
 
-        # Store conversation in database
         conn = get_db_connection()
         if conn:
             try:
