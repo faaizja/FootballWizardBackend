@@ -15,7 +15,8 @@ from sentence_transformers import SentenceTransformer
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app)
+
 
 # Set up logging 
 logging.basicConfig(level=logging.INFO)
