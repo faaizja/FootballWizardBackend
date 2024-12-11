@@ -28,6 +28,9 @@ goal_stats_df = pd.read_csv('goal_stats.csv')
 assist_stats_df = pd.read_csv('assists_stats.csv')
 clean_sheet_stats_df = pd.read_csv('defender_clean_sheets_stats.csv')
 
+previous_query = None
+previous_response = None
+
 # Create TF-IDF vectorizer
 vectorizer = TfidfVectorizer()
 
@@ -68,9 +71,10 @@ def retrieve_with_pandas_date(query, top_k=1):
         return True
     
 def without_data(query):
-    system_message = "You are a Premier League statistics analyst. Answer the following question accurately, concisely, and with a focus on relevant data."
+    system_message = "You are a Premier League statistics analyst. Answer the following question accurately, concisely, and with a focus on relevant data. If the question requires additional assumptions or context, clearly explain them in your response."
+
     completion = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system_message},
             {"role": "user", "content": query},
@@ -81,7 +85,7 @@ def without_data(query):
 
 def with_data(query, system_message):
     completion = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system_message},
             {"role": "user", "content": query},
@@ -92,7 +96,8 @@ def with_data(query, system_message):
     
 
 def get_relevant_data(query):
-    # Determine which CSV file to use based on the query
+    prediction = False
+    
     if 'goal' in query.lower():
         df = goal_stats_df
         context = "goal scorers"
@@ -102,11 +107,14 @@ def get_relevant_data(query):
     elif 'clean sheet' in query.lower():
         df = clean_sheet_stats_df
         context = "clean sheet statistics"
+    elif 'clean sheets' in query.lower():
+        df = clean_sheet_stats_df
+        context = "clean sheet statistics"
     else:
-        return None, None
-
-    # Extract year from query
+        return None, None, None
+    
     year_match = re.search(r'\b(20\d{2})\b', query)
+    
     if year_match:
         year = year_match.group(1)
         df_filtered = df[df['Year'].str.contains(year)]
@@ -114,36 +122,106 @@ def get_relevant_data(query):
         df_filtered = df
 
     if df_filtered.empty:
-        return None, None
+        return None, None, None
 
-    # Convert dataframe to string
     data_string = df_filtered.to_string(index=False)
-
-    return data_string, context
+    
+    prediction_keywords = ['predict', 'prediction', 'forecast', 'likely to', 'expected to']
+    is_prediction = any(keyword in query.lower() for keyword in prediction_keywords)
+    
+    return data_string, context, is_prediction
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    global previous_query, previous_response
+
     try:
         data = request.json
         user_input = data['message']
         
-        relevant_data = None
-        context = None
-        
         # Log the received prompt
         print(f"Received prompt from frontend: {user_input}")
+        
+        previous_keywords = [
+            'from the previous', 
+            'from the last', 
+            'from the prior', 
+            'continue from the previous', 
+            'based on the last', 
+            'as mentioned before', 
+            'as stated earlier', 
+            'building on that', 
+            'based on that',
+            'following up on that', 
+            'in addition to the previous', 
+            'using the last', 
+            'from earlier', 
+            'from above', 
+            'expand on the previous', 
+            'extend the last response', 
+            'carry on from before', 
+            'follow up on the last', 
+            'using what you just said', 
+            'like you said before', 
+            'elaborate on that', 
+            'furthermore on that', 
+            'add to the previous', 
+            'continue where we left off', 
+            'referring back to that', 
+            'keeping that in mind', 
+            'picking up from there', 
+            'like mentioned before', 
+            'referring to the earlier answer'
+        ]
+        
+        is_previous = any(keyword in user_input.lower() for keyword in previous_keywords)
 
-        if retrieve_with_pandas_date(user_input):
-            relevant_data, context = get_relevant_data(user_input)
+        # Check for a special request to use the previous response
+        if is_previous:
+            user_input = f"This was the previous response from you: {previous_response} and this was the previous user input: {previous_query}, now this is the current user input: {user_input}"
+            print("Appending previous response to the current query.")
 
-        if relevant_data:
-            system_message = f"""You are a Premier League stat analyst. Use the following {context} data to answer the question: {relevant_data} Provide a concise and accurate answer based solely on the data provided. If the data doesn't contain the exact information needed example the year 2019 or prior use any information from the internet or anywhere else to answer the question, use the closest relevant information and explain any assumptions or limitations."""
+        # Check date relevance
+        date_relevant = retrieve_with_pandas_date(user_input)
+        
+        # Get relevant data
+        relevant_data, context, is_prediction = get_relevant_data(user_input)
+
+        # Determine which model/approach to use
+        if not date_relevant:
+            completion = without_data(user_input)
+        elif is_prediction:
+            system_message = f"""You are a Premier League prediction expert. Using the following statistical data: {relevant_data}
+            
+            Provide a data-driven prediction for the query. Your response should:
+            1. Clearly explain the basis of the prediction
+            2. Use specific statistics from the provided data
+            3. Quantify the prediction where possible
+            4. Acknowledge any limitations or uncertainties in the prediction
+            
+            Prediction context: {context}
+            
+            User query: {user_input}"""
+            
             completion = with_data(system_message, user_input)
         else:
-            completion = without_data(user_input)
+            system_message = f"""You are a Premier League stat analyst. Use the following {context} data to answer the question: {relevant_data} 
+            
+            Provide a concise and accurate answer based solely on the data provided. 
+            If the data doesn't contain the exact information needed, explain the limitations."""
+            
+            completion = with_data(system_message, user_input)
 
         ai_response = completion.choices[0].message['content']
+        
+        # Save to global variables
+        previous_response = ai_response
+        previous_query = user_input
+        
+        print(previous_response)
+        print(previous_query)
 
+        # Database logging remains the same
         conn = get_db_connection()
         if conn:
             try:
