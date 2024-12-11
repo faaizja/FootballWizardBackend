@@ -11,6 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import re
 import numpy as np
 from sentence_transformers import SentenceTransformer
+import gunicorn
 
 load_dotenv()
 
@@ -244,4 +245,5 @@ def chat():
         return jsonify({"error": "An error occurred processing your request"}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
